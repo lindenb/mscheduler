@@ -1,0 +1,3 @@
+[submodule "j4make"]
+	path = j4make
+	url = https://github.com/lindenb/j4make.git
