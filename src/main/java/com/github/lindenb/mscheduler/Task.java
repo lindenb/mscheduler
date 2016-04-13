@@ -1,7 +1,9 @@
 package com.github.lindenb.mscheduler;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -17,7 +19,7 @@ public class Task {
 	@SuppressWarnings("unused")
 	private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(Task.class);
 	/** script file */
-	public String shellScript="";
+	public List<String> shellScriptLines= new ArrayList<String>();
 	/** target name as defined in the Makefile */
 	private String targetName;
 	/** base Makefile */
@@ -63,9 +65,12 @@ public class Task {
 		public Task entryToObject(final TupleInput in) {
 			String s = in.readString();
 			final Task t = new Task(s);
-			
-			t.shellScript = in.readString();
 			int n = in.readInt();
+			for(int i=0;i< n;++i)
+				{
+				t.shellScriptLines.add(in.readString());
+				}
+			n = in.readInt();
 			for(int i=0;i< n;++i)
 				{
 				t._prerequisites.add(in.readString());
@@ -89,7 +94,11 @@ public class Task {
 		public void objectToEntry(final Task t, TupleOutput out)
 			{
 			out.writeString(t.targetName);
-			out.writeString(t.shellScript);
+			out.writeInt(t.shellScriptLines.size());
+			for(final String s: t.shellScriptLines)
+				{
+				out.writeString(s);
+				}
 			out.writeInt(t._prerequisites.size());
 			for(final String s: t._prerequisites)
 				{
@@ -111,12 +120,7 @@ public class Task {
 		{
 		this(t.getName());
 		this.nodeId = t.getNodeId();
-		
-		 final StringBuilder sbl = new StringBuilder();
-    	 for(final String line: t.getShellLines()) {
-    		 sbl.append(line).append("\n");
-    	 }
-    	 this.shellScript = sbl.toString();
+    	this.shellScriptLines.addAll(t.getShellLines());
     	 for(final Target c:t.getPrerequisites()) {
     		 this._prerequisites.add(c.getName());
     	 }

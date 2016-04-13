@@ -45,82 +45,98 @@ private SGEScheduler() {
 	
 }
 
-@Override
-protected  int updateJobStatus(final Task t) {
-	final Pattern wsSplit = Pattern.compile("[ \t]+");
-	/* first we try qstat, and then qacct */
-	for(int side=0; side < 2;++side)
-		{
-		// qacct -j 393326
-		BufferedReader in = null;
-		try {
-		final List<String> cmdargs= new ArrayList<>();
-		cmdargs.add(side==0?"qstat":"qacct");
-		cmdargs.add("-j");
-		cmdargs.add(t.processId);
-		LOG.info("checking `"+String.join(" ", cmdargs)+"`");
-		final ProcessBuilder procbuilder= new ProcessBuilder(cmdargs);
-		procbuilder.directory(getWorkingDirectory());
-		final Process proc = procbuilder.start();
-		StreamBoozer sb = new StreamBoozer(proc.getErrorStream(),System.err,"["+(side==0?"qstat":"qacct")+"]");
-		sb.start();
-		in =new BufferedReader(new InputStreamReader(proc.getInputStream()));
-		String line;
-		boolean found_in_qstat=false;
-		boolean found_in_qacct=false;
-		while((line=in.readLine())!=null)
-			{
-			LOG.info(line);
-			final String tokens[]=wsSplit.split(line);
-			if(tokens.length<2) continue;
-			if(side==0) {
-					if(tokens[0].equals("job_number:") && tokens[1].equals(t.processId)) {
-					LOG.info("job "+t.processId+" still running");
-					found_in_qstat = true;
+private class SGEStatusChecker extends StatusChecker
+	{
+	SGEStatusChecker(final Task task) {
+		super(task);
+		}
+	@Override
+	public Integer call() throws Exception {
+		final Pattern wsSplit = Pattern.compile("[ \t]+");
+		/* first we try qstat, and then qacct */
+		for(int side=0; side < 2;++side)
+			{	
+			BufferedReader in = null;
+			try {
+				final List<String> cmdargs= new ArrayList<>();
+				cmdargs.add(side==0?"qstat":"qacct");
+				cmdargs.add("-j");
+				cmdargs.add(super.task.processId);
+				LOG.info("checking `"+String.join(" ", cmdargs)+"`");
+				final ProcessBuilder procbuilder= new ProcessBuilder(cmdargs);
+				procbuilder.directory(getBaseDirectory());
+				final Process proc = procbuilder.start();
+				final StreamBoozer sb = new StreamBoozer(proc.getErrorStream(),System.err,"["+(side==0?"qstat":"qacct")+"]");
+				sb.start();
+				in =new BufferedReader(new InputStreamReader(proc.getInputStream()));
+				String line;
+				boolean found_in_qstat=false;
+				boolean found_in_qacct=false;
+				while((line=in.readLine())!=null)
+					{
+					LOG.info(line);
+					final String tokens[]=wsSplit.split(line);
+					if(tokens.length<2) continue;
+					if(side==0) {
+							if(tokens[0].equals("job_number:") && tokens[1].equals(task.processId)) {
+							LOG.info("job "+super.task+" still running");
+							found_in_qstat = true;
+							task.targetStatus = TaskStatus.RUNNING;
+							}
+						}
+					else
+						{
+						if(tokens[0].equals("exit_status") ) {
+							found_in_qacct = true;
+							if(tokens[1].equals("0")) {
+								task.targetStatus = TaskStatus.COMPLETED;
+							} else {
+								LOG.info("job "+super.task+" FAILED");
+								task.targetStatus = TaskStatus.ERROR;
+								}
+							}
+						if(tokens[0].equals("failed") ) {
+							found_in_qacct = true;
+							if(tokens[1].equals("0")) {
+								task.targetStatus = TaskStatus.COMPLETED;
+							} else {
+								LOG.info("job "+ super.task +" FAILED");
+								task.targetStatus = TaskStatus.ERROR;
+								}
+							}
+						}
 					}
+				in.close();
+				in=null;
+				
+				int ret = proc.waitFor();
+				if(ret!=0)
+					{
+					LOG.error("["+(side==0?"qstat":"qacct")+"] process failed");
+					if(side==1) {
+						return -1;
+					}
+					}
+				if(found_in_qstat) return 0;
+				if(found_in_qacct)  return 0;
 				}
-			else
+			catch (Exception e) {
+				LOG.error("boum", e);
+				return -1;				} 
+			finally 
 				{
-				if(tokens[0].equals("exit_status") ) {
-					found_in_qacct = true;
-					if(tokens[1].equals("0")) {
-						t.targetStatus = TaskStatus.COMPLETED;
-					} else {
-						LOG.info("job "+t.processId+" FAILED");
-						t.targetStatus = TaskStatus.ERROR;
-						}
-					}
-				if(tokens[0].equals("failed") ) {
-					found_in_qacct = true;
-					if(tokens[1].equals("0")) {
-						t.targetStatus = TaskStatus.COMPLETED;
-					} else {
-						LOG.info("job "+t.processId+" FAILED");
-						t.targetStatus = TaskStatus.ERROR;
-						}
-					}
+				IoUtils.close(in);
 				}
 			}
-		in.close();
-		in=null;
-		
-		int ret = proc.waitFor();
-		if(ret!=0)
-			{
-			LOG.error("["+(side==0?"qstat":"qacct")+"] process failed");
-			if(side==1) return -1;
-			}
-		if(found_in_qstat) return 0;
-		if(found_in_qacct)  return 0;
-	} catch (final Exception e) {
-		LOG.error("boum", e);
-		return -1;	
-		} finally {
-			IoUtils.close(in);
+		LOG.info("found neither in qstat or qacc");
+		return -1;
 		}
 	}
-	return -1;
-}
+
+@Override
+protected StatusChecker createStatusChecker(final Task task) {
+	return new SGEStatusChecker(task);
+	}
 
 @Override
 protected void kill(final Task t) throws IOException {
@@ -145,11 +161,18 @@ protected int submitJob(final Task task) {
 		pw.println("#$ -o "+task.stdoutFile.getPath());
 		pw.println("#$ -e "+task.stderrFile.getPath());
 		pw.println("#$ -cwd");
+		pw.println("#$ -S /bin/bash");
+		for(final String s:task.shellScriptLines) {
+			if(!s.startsWith("#$")) continue;
+			pw.println(s);
+			}
 		
+		pw.println("cd '"+super.getBaseDirectory()+"' ;");
 		
-		pw.println("cd '"+super.getWorkingDirectory()+"' ;");
-		
-		pw.println(task.shellScript);
+		for(final String s:task.shellScriptLines) {
+			if(s.startsWith("#$")) continue;
+			pw.println(s);
+			}
 		
 		pw.flush();
 		if(pw.checkError()) throw new IOException("Boum");

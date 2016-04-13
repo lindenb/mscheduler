@@ -26,12 +26,17 @@ package com.github.lindenb.mscheduler;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -64,12 +69,14 @@ public abstract class MScheduler {
 	private static final String OPTION_MAKEFILEIN="m";
 	private static final String OPTION_RESETFAILURE="r";
 	private static final String OPTION_N_JOBS="j";
+	private static final String BASEDIRKEY="base.directory";
 	private Options options = new Options();
 	private CommandLine cmdLine = null;
 	private Environment environment = null;
 	private Database targetsDatabase = null;
 	private Database metaDatabase = null;
 	private File workingDirectory = null;
+	private File baseDir = null;
 
 	
 protected MScheduler() {
@@ -114,16 +121,16 @@ protected File getWorkingDirectory(){
 	return this.workingDirectory;
 }
 
+protected File getBaseDirectory(){
+	if(this.baseDir==null) throw new IllegalStateException();
+	return this.baseDir;
+}
+
+
 private File getStopFile() {
 	return new File(this.workingDirectory,"STOP");
 }
 
-private void createLockFile() throws IOException {
-	final File lockFile = getStopFile();
-	lockFile.deleteOnExit();
-	final FileOutputStream fos=new FileOutputStream(lockFile);
-	fos.write('\n');fos.flush();fos.close();
-}
 
 /** open bdb env */
 private int openEnvironement(Transaction txn,boolean allowCreate,boolean readOnly) throws IOException {
@@ -163,6 +170,21 @@ private int openEnvironement(Transaction txn,boolean allowCreate,boolean readOnl
 		cfg.setAllowCreate(allowCreate);
 		cfg.setReadOnly(readOnly);
 		this.metaDatabase = this.environment.openDatabase(txn, "metaDatabase",cfg);	
+		
+		
+		if(allowCreate==false) {
+			final DatabaseEntry key=new DatabaseEntry();
+			StringBinding.stringToEntry(BASEDIRKEY, key);
+			final DatabaseEntry data=new DatabaseEntry();
+			if( this.metaDatabase.get(null, key, data, LockMode.DEFAULT)!=OperationStatus.SUCCESS){
+				LOG.error("cannot get "+ BASEDIRKEY);
+				return -1;
+				}
+			this.baseDir = new File(StringBinding.entryToString(data));
+			
+		}
+		
+		LOG.info("STOP FILE IS "+getStopFile());
 		return 0;
 		}
 	catch(final Exception err) {
@@ -284,7 +306,7 @@ private int build(final String argv[]) {
         	 final Task task = new Task(t);       
         	 
         	 //skip those targets, eg. "Makefile"
-        	 if(task.shellScript.trim().isEmpty() && task.getPrerequisites().isEmpty()) {
+        	 if(task.shellScriptLines.isEmpty() && task.getPrerequisites().isEmpty()) {
         		 task.targetStatus = TaskStatus.COMPLETED;
         	 }
         	 
@@ -297,6 +319,13 @@ private int build(final String argv[]) {
          }
          
          LOG.info("inserting metadata");
+         StringBinding.stringToEntry( BASEDIRKEY,key);
+         StringBinding.stringToEntry(makefileIn.getParentFile().getPath(),data);
+         if( this.metaDatabase.put(txn, key, data) != OperationStatus.SUCCESS) {
+    		 LOG.error("Cannot insert "+BASEDIRKEY);
+    		 return -1;
+    	 	}
+         
 		return 0;
 	} catch(Exception err) {
 		LOG.error("Boum", err);
@@ -314,8 +343,22 @@ private int kill(final String argv[]) {
 Cursor c = null;
 Transaction txn = null;
 try {
+	this.options.addOption(Option.builder(OPTION_RESETFAILURE).
+			hasArg(false).
+			longOpt("reset").
+			desc("reset failure : ERROR -> UNDEFINED").
+			build()
+			);	
+
+	
 	final CommandLineParser parser = new DefaultParser();
 	this.cmdLine = parser.parse(this.options, argv);
+	
+	if(this.cmdLine.hasOption(OPTION_HELP)) {
+		printHelp("kill current running jobs");
+		return 0;
+	}
+	
 	if(!this.cmdLine.getArgList().isEmpty()) {
 		LOG.error("Illegal number of arguments");
 		return -1;
@@ -324,24 +367,50 @@ try {
 	if(openEnvironement(txn, false,false)!=0) return -1;
 	
 	
+	final boolean resetfailure=this.cmdLine.hasOption(OPTION_RESETFAILURE);
+
+	
 	c = this.targetsDatabase.openCursor(txn,null);
 	final DatabaseEntry key=new DatabaseEntry();
 	final DatabaseEntry data=new DatabaseEntry();
 	final Task.Binding taskBinding = new Task.Binding();
 	while(c.getNext(key, data, LockMode.DEFAULT)==OperationStatus.SUCCESS)
 		{
-		final Task t=taskBinding.entryToObject(data);
-		if(t.getName().contains("<")) continue;//<ROOT>
-		if( t.targetStatus != TaskStatus.RUNNING) continue;
-		LOG.warn("killing "+t);
-		kill(t);
-		t.targetStatus= TaskStatus.ERROR;
-		taskBinding.objectToEntry(t, data);
-		if(c.putCurrent(data)!=OperationStatus.SUCCESS)
-			{
-			LOG.error("Cannot update "+t.getName());
-			return -1;
+		final Task t = taskBinding.entryToObject(data);
+		if (t.getName().contains("<")) continue;// <ROOT>
+		switch (t.targetStatus) {
+			case COMPLETED:
+				break;
+			case TOBEDONE:
+				break;
+			case RUNNING: {
+				LOG.warn("killing " + t);
+				kill(t);
+				t.targetStatus = (resetfailure ? TaskStatus.ERROR : TaskStatus.TOBEDONE);
+				taskBinding.objectToEntry(t, data);
+				if (c.putCurrent(data) != OperationStatus.SUCCESS) {
+					LOG.error("Cannot update " + t.getName());
+					return -1;
+				}
+				break;
 			}
+			case ERROR: {
+				if (resetfailure) {
+					LOG.warn("Reset status of " + t);
+					t.targetStatus = TaskStatus.TOBEDONE;
+					taskBinding.objectToEntry(t, data);
+					if (c.putCurrent(data) != OperationStatus.SUCCESS) {
+						LOG.error("Cannot reset status of " + t);
+						return -1;
+					}
+				}
+				break;
+			}
+			default: {
+				LOG.error("illegal state " + t.getName());
+				return -1;
+			}
+		}
 		}
 	return 0;
 } catch(final Exception err) {
@@ -411,9 +480,43 @@ try {
 	close();
 }
 }
+protected abstract class StatusChecker implements Callable<Integer>
+	{
+	protected final Task task;
+	protected StatusChecker(final Task task) {
+		this.task = task;
+		}
+	}
 
-protected abstract int updateJobStatus(final Task t);
+protected abstract StatusChecker createStatusChecker(final Task task);
 
+protected int updateJobStatus(final Task task) {
+	final StatusChecker call  =  createStatusChecker(task);
+	final ExecutorService executor = Executors.newSingleThreadExecutor();
+	final Future<Integer> future = executor.submit(call);
+	int return_status = -1;
+
+    try {
+    	//allow 10 seconds to get status
+    	return_status = future.get(10, TimeUnit.SECONDS);
+    	
+    	return return_status;
+    	}
+    catch (TimeoutException e) {
+        future.cancel(true);
+        LOG.error("Timeout for gettting job status and "+task);
+        return -1;
+    	}
+    catch (Exception e) {
+        future.cancel(true);
+        LOG.error("Failure:",e);
+        return -1;
+    	}
+    finally
+    	{
+    	executor.shutdown();
+    	}
+	}
 
 private int runstep(final String argv[]) {
 	final Transaction txn=null;
@@ -421,12 +524,6 @@ private int runstep(final String argv[]) {
 	int max_jobs = 1;
 	try {
 		
-		this.options.addOption(Option.builder(OPTION_RESETFAILURE).
-				hasArg(false).
-				longOpt("reset").
-				desc("reset failure : ERROR -> UNDEFINED").
-				build()
-				);	
 		this.options.addOption(Option.builder(OPTION_N_JOBS).
 				hasArg(true).
 				longOpt("jobs").
@@ -436,6 +533,13 @@ private int runstep(final String argv[]) {
 		
 		final CommandLineParser parser = new DefaultParser();
 		this.cmdLine = parser.parse(this.options, argv);		
+		
+		if(this.cmdLine.hasOption(OPTION_HELP)) {
+			printHelp("Execute one step");
+			return 0;
+		}
+		
+		
 		if(!this.cmdLine.getArgList().isEmpty()) {
 			LOG.error("Illegal number of arguments");
 			return -1;
@@ -446,7 +550,6 @@ private int runstep(final String argv[]) {
 		}
 		
 		
-		final boolean resetfailure=this.cmdLine.hasOption(OPTION_RESETFAILURE);
 		
 		if(this.parseWorkingDirectory()!=0) return -1;
 		if(openEnvironement(txn, false,false)!=0) return -1;
@@ -468,18 +571,8 @@ private int runstep(final String argv[]) {
 				case ERROR:
 					last_failed_job = jobInfo;
 					LOG.error("job "+jobInfo+" failed.. Use -reset to reset values");
-					if(resetfailure)
-						{
-						LOG.warn("Reset status of "+jobInfo);
-						jobInfo.targetStatus = TaskStatus.TOBEDONE;
-						taskBinding.objectToEntry(jobInfo, data);
-						if(c.putCurrent(data)!=OperationStatus.SUCCESS) {
-							LOG.error("Cannot reset status of "+jobInfo);
-							return -1;
-							}
-						}
-					continue;
-				
+					break;
+
 				/* last time we checked, the job was running */
 				case RUNNING:
 					{
@@ -603,13 +696,6 @@ private int runstep(final String argv[]) {
 			}
 		c.close();c=null;
 		
-
-		if(resetfailure)
-			{
-			LOG.info("exiting after reset");
-			return 0;
-			}
-		
 		/* we found one failed job, exit with failure */
 		if( last_failed_job != null)
 			{
@@ -620,13 +706,24 @@ private int runstep(final String argv[]) {
 		LOG.info("submitting "+targetsToDo.size()+" job(s)");
 		for(final Task task: targetsToDo)
 			{
+			if(getStopFile().exists()) {
+				LOG.warn("Stop file was detected "+getStopFile());
+				return -1;
+			}
+			
 			if(task.targetStatus!=TaskStatus.TOBEDONE) {
 				throw new IllegalStateException("shouldn't submit "+task);
 			}
-			if(submitJob(task)!=0) return -1;
-			if(task.targetStatus!=TaskStatus.RUNNING) {
-				throw new IllegalStateException();
-			}
+			if(task.shellScriptLines.isEmpty()) {
+				task.targetStatus=TaskStatus.COMPLETED;
+				}
+			else 
+				{
+				if(submitJob(task)!=0) return -1;
+				if(task.targetStatus!=TaskStatus.RUNNING) {
+					throw new IllegalStateException();
+					}
+				}
 			LOG.info("updating "+task);
 			StringBinding.stringToEntry(task.getName(), key);
 			taskBinding.objectToEntry(task, data);
@@ -652,10 +749,10 @@ private int instanceMain(final String[] args) {
 
 	if(args.length<1) {
 		System.err.println("Usage: ");
-		System.err.println(" kill ");
-		System.err.println(" list ");
+		System.err.println(" kill : kill running jobs");
+		System.err.println(" list list all jobs");
 		System.err.println(" build : create new scheduler from an existing Makefile ");
-		System.err.println(" run ");
+		System.err.println(" run  execute one step");
 		return -1;
 	} else if(args[0].equals("kill")) {
 		final String args2[]=new String[args.length-1];
@@ -681,6 +778,54 @@ private int instanceMain(final String[] args) {
 	
 	}
 
+
+protected int countProcessors(final List<String> lines)
+	{
+	final String script=String.join("\n", lines);
+	int maxproc=1;
+	int proc=1;
+	int i=0;
+	while( i < script.length() )
+		{
+		char c1 = script.charAt(i);
+		char c2 = (i+1 < script.length()?script.charAt(i+1):' ');
+		if( c1=='\'' || c1=='\"')
+			{
+			char quote=c1;
+			i++;
+			while( i < script.length() && script.charAt(i)!=quote)
+				{
+				if(script.charAt(i)=='\\') ++i;
+				++i;
+				}
+			continue;
+			}
+		else if(c1=='\\' && c2=='\n')
+			{
+			i+=2;
+			continue;
+			}
+		else if((c1=='&' && c2=='&') || (c1=='|' && c2=='|'))
+			{
+			maxproc = Math.max(proc, maxproc);
+			proc = 1;
+			i+=2;
+			continue;
+			}
+		else if(c1=='\n' || c1==';' || c1=='|')
+			{
+			maxproc = Math.max(proc, maxproc);
+			proc = 1;
+			i++;
+			continue;
+			}
+		else
+			{
+			++i;
+			}
+		}
+	return maxproc;
+	}
 
 protected void instanceMainWithExit(String[] args) {
 	System.exit(instanceMain(args));

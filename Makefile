@@ -4,7 +4,23 @@ SPACE := $(EMPTY) $(EMPTY)
 berkeleydb.version?=6.2.31
 berkeleydb.jar?=$(lib.dir)/com/sleepycat/je/${berkeleydb.version}/je-${berkeleydb.version}.jar
 
-.PHONY: all clean test sgescheduler
+define call_compile
+
+$(1): ${all_maven_jars} $${berkeleydb.jar} j4make/dist/j4make.jar
+	rm -rf _tmp  dist/$(1).jar
+	mkdir -p _tmp/META-INF dist
+	$$(foreach J,$$(filter %.jar,$$^),unzip -q -o $${J} -d _tmp;)
+	javac -d _tmp -sourcepath src/main/java \
+		-cp  "$$(subst $$(SPACE),:,$$(filter %.jar,$$^))" \
+		./src/main/java/com/github/lindenb/mscheduler/$(2).java
+	echo "Manifest-Version: 1.0" > _tmp/META-INF/MANIFEST.MF
+	echo "Main-Class: com.github.lindenb.mscheduler.$(2)" >>_tmp/META-INF/MANIFEST.MF
+	jar cMf dist/$(1).jar -C _tmp .
+	rm -rf _tmp
+
+endef
+
+.PHONY: all clean test sgescheduler ccrtscheduler
 
 j4make.jars =  \
 	$(lib.dir)/commons-cli/commons-cli/1.3.1/commons-cli-1.3.1.jar \
@@ -15,21 +31,12 @@ j4make.jars =  \
 
 all_maven_jars = $(sort  ${apache.derby.tools} ${j4make.jars})
 
-all: sgescheduler  ${all_maven_jars} ${berkeleydb.jar} j4make/dist/j4make.jar
+all: sgescheduler ccrtscheduler
 
 
-sgescheduler: ${all_maven_jars} ${berkeleydb.jar} j4make/dist/j4make.jar
-	rm -rf _tmp  dist/sgescheduler.jar
-	mkdir -p _tmp/META-INF dist
-	$(foreach J,$(filter %.jar,$^),unzip -q -o ${J} -d _tmp;)
-	javac -d _tmp -sourcepath src/main/java \
-		-cp  "$(subst $(SPACE),:,$(filter %.jar,$^))" \
-		./src/main/java/com/github/lindenb/mscheduler/SGEScheduler.java
-	echo "Manifest-Version: 1.0" > _tmp/META-INF/MANIFEST.MF
-	echo "Main-Class: com.github.lindenb.mscheduler.SGEScheduler" >>_tmp/META-INF/MANIFEST.MF
-	jar cMf dist/sgescheduler.jar -C _tmp .
-	rm -rf _tmp
-	
+$(eval $(call call_compile,sgescheduler,SGEScheduler))
+$(eval $(call call_compile,ccrtscheduler,CCRTScheduler))
+
 
 test : sgescheduler
 	rm -rf _tmp
