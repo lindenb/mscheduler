@@ -9,13 +9,9 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.LoggerFactory;
 
 import com.github.lindenb.j4make.Target;
-import com.sleepycat.bind.tuple.LongBinding;
 import com.sleepycat.bind.tuple.TupleBinding;
 import com.sleepycat.bind.tuple.TupleInput;
 import com.sleepycat.bind.tuple.TupleOutput;
-import com.sleepycat.je.DatabaseEntry;
-import com.sleepycat.je.SecondaryDatabase;
-import com.sleepycat.je.SecondaryKeyCreator;
 
 public class Task {
 	@SuppressWarnings("unused")
@@ -74,15 +70,17 @@ public class Task {
 				{
 				t._prerequisites.add(in.readString());
 				}
-			t.targetStatus = TaskStatus.valueOf(in.readString());
 			
+			t.targetStatus = TaskStatus.valueOf(in.readString());
 			t.nodeId = in.readLong();
+			
 			t.shellScriptFile = readFile(in);
 			t.startMilliSec = in.readLong();
 			t.endMilliSec = in.readLong();
 			t.baseDir = readFile(in);
 			t.stdoutFile = readFile(in);
 			t.stderrFile = readFile(in);
+			
 			t.processId = in.readString();
 			if( t.processId.isEmpty()) t.processId=null;
 			return t;

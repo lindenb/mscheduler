@@ -59,10 +59,11 @@ import com.sleepycat.je.Transaction;
 
 public abstract class MScheduler {
 	private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(MScheduler.class);
-	private static final String OPTION_HELP="o";
+	private static final String OPTION_HELP="h";
 	private static final String OPTION_WORKDIR="d";
 	private static final String OPTION_MAKEFILEIN="m";
 	private static final String OPTION_RESETFAILURE="r";
+	private static final String OPTION_N_JOBS="j";
 	private Options options = new Options();
 	private CommandLine cmdLine = null;
 	private Environment environment = null;
@@ -72,7 +73,7 @@ public abstract class MScheduler {
 
 	
 protected MScheduler() {
-	this.options.addOption(Option.builder(OPTION_HELP).longOpt("help").hasArg(false).desc("print help").build());
+	this.options.addOption(Option.builder(OPTION_HELP).hasArg(false).longOpt("help").hasArg(false).desc("print help").build());
 	this.options.addOption(Option.builder(OPTION_WORKDIR).
 			hasArg(true).
 			longOpt("workdir").
@@ -96,6 +97,11 @@ private int parseWorkingDirectory() {
 		LOG.error("working directory is not a directory: "+this.workingDirectory);
 		return -1;
 	}
+	
+	if(!this.workingDirectory.isAbsolute()) {
+		LOG.error("working directory must be absolute: "+this.workingDirectory);
+		return -1;
+	}
 	return 0;
 }
 
@@ -108,38 +114,80 @@ protected File getWorkingDirectory(){
 	return this.workingDirectory;
 }
 
-private File getLockFile() {
-	return new File(this.workingDirectory,"lock");
+private File getStopFile() {
+	return new File(this.workingDirectory,"STOP");
 }
 
 private void createLockFile() throws IOException {
-	final File lockFile = getLockFile();
+	final File lockFile = getStopFile();
 	lockFile.deleteOnExit();
 	final FileOutputStream fos=new FileOutputStream(lockFile);
 	fos.write('\n');fos.flush();fos.close();
 }
 
-private void openEnvironement(Transaction txn,boolean e) throws IOException {
-	LOG.info("opening bdb env in "+this.workingDirectory);
-	final EnvironmentConfig envCfg = new EnvironmentConfig();
-	this.environment = new Environment(this.workingDirectory, envCfg);
-	LOG.info("opening db 'targets'");
-	DatabaseConfig cfg = new DatabaseConfig();
-	this.targetsDatabase = this.environment.openDatabase(txn, "targets",cfg);
-	
-	cfg = new DatabaseConfig();
-	this.metaDatabase = this.environment.openDatabase(txn, "metaDatabase",cfg);	
-}
+/** open bdb env */
+private int openEnvironement(Transaction txn,boolean allowCreate,boolean readOnly) throws IOException {
+	try {
+		if(this.workingDirectory==null) {
+			LOG.error("working directory undefined");
+			return -1;
+		}
+		if(!this.workingDirectory.isDirectory() ) {
+			LOG.error("working directory doesn't exist. "+this.workingDirectory);
+			return -1;
+		}
+		if(!this.workingDirectory.isDirectory()) {
+			LOG.error("working directory is not a directory " + this.workingDirectory.getPath());
+			return -1;
+		}
+		
+		if(getStopFile().exists()) {
+			LOG.warn("Stop file was detected "+getStopFile());
+			return -1;
+		}
+		
+		LOG.info("opening bdb env in "+this.workingDirectory+" create:"+allowCreate+" readonly:"+readOnly);
+		final EnvironmentConfig envCfg = new EnvironmentConfig();
+		envCfg.setAllowCreate(allowCreate);
+		envCfg.setReadOnly(readOnly);
+		envCfg.setConfigParam(EnvironmentConfig.LOG_FILE_MAX,"500000000");
+		envCfg.setTransactional(false);
+		this.environment = new Environment(this.workingDirectory, envCfg);
+		LOG.info("opening db 'targets'");
+		DatabaseConfig cfg = new DatabaseConfig();
+		cfg.setAllowCreate(allowCreate);
+		cfg.setReadOnly(readOnly);
+		this.targetsDatabase = this.environment.openDatabase(txn, "targets",cfg);
+		
+		cfg = new DatabaseConfig();
+		cfg.setAllowCreate(allowCreate);
+		cfg.setReadOnly(readOnly);
+		this.metaDatabase = this.environment.openDatabase(txn, "metaDatabase",cfg);	
+		return 0;
+		}
+	catch(final Exception err) {
+		LOG.error("cannot open db",err);
+		return -1;
+		}
+	}
 
+/** close BDB env */
 private void close() {
 	if(this.metaDatabase!=null) this.metaDatabase.close();
 	this.metaDatabase=null;
-	if(this.targetsDatabase!=null) this.targetsDatabase.close();
+	
+	if(this.targetsDatabase!=null){
+		this.targetsDatabase.close();
+	}
 	this.targetsDatabase=null;
+	
+	
 	if(this.environment!=null)
 		{
 		this.environment.sync();
-		try { this.environment.cleanLog(); } catch(final Exception err2) {}
+		if(!this.environment.getConfig().getReadOnly()){
+		try { this.environment.cleanLog(); } catch(final Exception err2) {err2.printStackTrace();}
+		}
 		this.environment.close();
 		}
 	this.environment = null;
@@ -186,7 +234,7 @@ private int build(final String argv[]) {
 			return -1;
 		}
 		final File makefileIn =new File(cmdLine.getOptionValue(OPTION_MAKEFILEIN));
-		if( makefileIn.exists()) {
+		if( !makefileIn.exists()) {
 			System.err.println("Option -"+OPTION_MAKEFILEIN+" file doesn't exists: "+makefileIn);
 			return -1;
 		}
@@ -201,14 +249,19 @@ private int build(final String argv[]) {
 		}
 		
 		
-		openEnvironement(txn, true);		
+		if(openEnvironement(txn, true,false)!=0) {
+			return -1;
+		}
          
      	final List<String> cmdargs= new ArrayList<>();
 		cmdargs.add("make");
 		cmdargs.add("-ndr");
+		cmdargs.add("-C");
+		cmdargs.add(makefileIn.getParentFile().getPath());
 		cmdargs.add("-f");
 		cmdargs.add(makefileIn.getName());
 		for(final String arg: args) cmdargs.add(arg);
+		
 		LOG.info("invoking make :"+String.join(" ", cmdargs));
 		final ProcessBuilder procbuilder= new ProcessBuilder(cmdargs);
 		procbuilder.directory(makefileIn.getParentFile());
@@ -221,19 +274,28 @@ private int build(final String argv[]) {
 	    in = new BufferedReader(new InputStreamReader(proc.getInputStream()));
 	    final Graph graph = Graph.parse(in);
 	    IoUtils.close(in);in=null;
-         
+	    final Task.Binding taskBinding = new Task.Binding();
+         int nTargets=0;
          LOG.info("inserting targets");
+         final DatabaseEntry key = new DatabaseEntry();
+         final DatabaseEntry data = new DatabaseEntry();
          for(final Target t: graph.getTargets()) {
-        	 final Task task = new Task(t);
-        	 final DatabaseEntry key = new DatabaseEntry();
+        	 if(nTargets++%100==0) LOG.info("inserting "+t.getName()+" "+nTargets);
+        	 final Task task = new Task(t);       
+        	 
+        	 //skip those targets, eg. "Makefile"
+        	 if(task.shellScript.trim().isEmpty() && task.getPrerequisites().isEmpty()) {
+        		 task.targetStatus = TaskStatus.COMPLETED;
+        	 }
+        	 
         	 StringBinding.stringToEntry(t.getName(), key);
-        	 final DatabaseEntry data = new DatabaseEntry();
+        	 taskBinding.objectToEntry(task, data);
         	 if( this.targetsDatabase.put(txn, key, data) != OperationStatus.SUCCESS) {
         		 LOG.error("Cannot insert "+task);
         		 return -1;
         	 }
          }
-
+         
          LOG.info("inserting metadata");
 		return 0;
 	} catch(Exception err) {
@@ -259,7 +321,8 @@ try {
 		return -1;
 	}
 	if(this.parseWorkingDirectory()!=0) return -1;
-	openEnvironement(txn, false);
+	if(openEnvironement(txn, false,false)!=0) return -1;
+	
 	
 	c = this.targetsDatabase.openCursor(txn,null);
 	final DatabaseEntry key=new DatabaseEntry();
@@ -268,12 +331,11 @@ try {
 	while(c.getNext(key, data, LockMode.DEFAULT)==OperationStatus.SUCCESS)
 		{
 		final Task t=taskBinding.entryToObject(data);
+		if(t.getName().contains("<")) continue;//<ROOT>
 		if( t.targetStatus != TaskStatus.RUNNING) continue;
 		LOG.warn("killing "+t);
-		
 		kill(t);
 		t.targetStatus= TaskStatus.ERROR;
-		
 		taskBinding.objectToEntry(t, data);
 		if(c.putCurrent(data)!=OperationStatus.SUCCESS)
 			{
@@ -295,16 +357,22 @@ protected abstract int submitJob(final Task task);
 
 private int list(final String argv[]) {
 Cursor c = null;
-Transaction txn = null;
+final Transaction txn = null;
 try {
 	final CommandLineParser parser = new DefaultParser();
 	this.cmdLine = parser.parse(this.options, argv);
+	
+	if(this.cmdLine.hasOption(OPTION_HELP)) {
+		printHelp("Build scheduler from Makefile");
+		return 0;
+	}
+	
 	if(!this.cmdLine.getArgList().isEmpty()) {
 		LOG.error("Illegal number of arguments");
 		return -1;
 	}
 	if(this.parseWorkingDirectory()!=0) return -1;
-	openEnvironement(txn, false);
+	openEnvironement(txn, false,true);
 	
 	c = this.targetsDatabase.openCursor(txn,null);
 	final DatabaseEntry key=new DatabaseEntry();
@@ -313,9 +381,11 @@ try {
 	while(c.getNext(key, data, LockMode.DEFAULT)==OperationStatus.SUCCESS)
 		{
 		final Task t = taskBinding.entryToObject(data);
-		System.out.print(t.getFile());
+		if(t.getName().contains("<")) continue;//<ROOT>
+		
+		System.out.print(t.getName());
 		System.out.print('\t');
-		System.out.print(t.id);
+		System.out.print(t.processId==null?"*":t.processId);
 		System.out.print('\t');
 		System.out.print(t.targetStatus);
 		System.out.print('\t');
@@ -342,13 +412,13 @@ try {
 }
 }
 
-protected abstract int getJobStatus(final Task t);
+protected abstract int updateJobStatus(final Task t);
 
 
 private int runstep(final String argv[]) {
-	Transaction txn=null;
+	final Transaction txn=null;
 	Cursor c = null;
-	
+	int max_jobs = 1;
 	try {
 		
 		this.options.addOption(Option.builder(OPTION_RESETFAILURE).
@@ -357,6 +427,13 @@ private int runstep(final String argv[]) {
 				desc("reset failure : ERROR -> UNDEFINED").
 				build()
 				);	
+		this.options.addOption(Option.builder(OPTION_N_JOBS).
+				hasArg(true).
+				longOpt("jobs").
+				desc("specify number of parallel jobs").
+				build()
+				);	
+		
 		final CommandLineParser parser = new DefaultParser();
 		this.cmdLine = parser.parse(this.options, argv);		
 		if(!this.cmdLine.getArgList().isEmpty()) {
@@ -364,14 +441,15 @@ private int runstep(final String argv[]) {
 			return -1;
 		}
 		
-		int max_jobs = 1;//TODO
+		if(this.cmdLine.hasOption(OPTION_N_JOBS)) {
+			max_jobs = Integer.parseInt(this.cmdLine.getOptionValue(OPTION_N_JOBS));
+		}
+		
 		
 		final boolean resetfailure=this.cmdLine.hasOption(OPTION_RESETFAILURE);
 		
 		if(this.parseWorkingDirectory()!=0) return -1;
-		
-		
-		openEnvironement(txn, false);
+		if(openEnvironement(txn, false,false)!=0) return -1;
 
 		Task last_failed_job = null;
 		
@@ -382,6 +460,7 @@ private int runstep(final String argv[]) {
 		DatabaseEntry data=new DatabaseEntry();
 		while(c.getNext(key, data, LockMode.DEFAULT)==OperationStatus.SUCCESS) {
 			final Task jobInfo = taskBinding.entryToObject(data);
+			if(jobInfo.getName().contains("<")) continue;//<ROOT>
 			switch(jobInfo.targetStatus)
 				{
 				case TOBEDONE: break;
@@ -405,10 +484,10 @@ private int runstep(final String argv[]) {
 				case RUNNING:
 					{
 					LOG.info("checking if job is running "+jobInfo);
-					if(getJobStatus(jobInfo)!=0) {
+					if(updateJobStatus(jobInfo)!=0) {
 						return -1;
 						}
-			        
+			        /* check new target status */
 					switch(jobInfo.targetStatus)
 						{
 						case RUNNING:
@@ -461,7 +540,6 @@ private int runstep(final String argv[]) {
 								LOG.error("Cannot update status of "+jobInfo);
 								return -1;
 								}
-							max_jobs = Math.max(max_jobs-1,0); 
 							break;
 							}
 						default: throw new IllegalStateException(jobInfo+" "+jobInfo.targetStatus);
@@ -480,8 +558,8 @@ private int runstep(final String argv[]) {
 		}
 		
 		if(max_jobs<1) {
-			LOG.error("Exiting because : max_jobs <= 0");
-			return -1;
+			LOG.error("Exiting because : max_jobs < 1");
+			return 0;
 		}
 		
 		final List<Task> targetsToDo = new ArrayList<>();
@@ -490,6 +568,7 @@ private int runstep(final String argv[]) {
 		data=new DatabaseEntry();
 		while(c.getNext(key, data, LockMode.DEFAULT)==OperationStatus.SUCCESS  && targetsToDo.size()< max_jobs ) {
 			final Task t = taskBinding.entryToObject(data);
+			if(t.getName().contains("<")) continue;//<ROOT>
 			if(t.targetStatus==TaskStatus.COMPLETED || t.targetStatus==TaskStatus.RUNNING) continue;
 			if(t.targetStatus==TaskStatus.ERROR) {
 				LOG.warn("Uhhh??");
@@ -538,16 +617,23 @@ private int runstep(final String argv[]) {
 			return -1;
 			}
 		
-
-		for(final Task t: targetsToDo)
+		LOG.info("submitting "+targetsToDo.size()+" job(s)");
+		for(final Task task: targetsToDo)
 			{
-			if(submitJob(t)!=0) return -1;
-			StringBinding.stringToEntry(t.getName(), key);
-			taskBinding.objectToEntry(t, data);
-			if(this.targetsDatabase.put(null, key, data)!=OperationStatus.SUCCESS) {
-				LOG.error("Cannot update "+t);
+			if(task.targetStatus!=TaskStatus.TOBEDONE) {
+				throw new IllegalStateException("shouldn't submit "+task);
+			}
+			if(submitJob(task)!=0) return -1;
+			if(task.targetStatus!=TaskStatus.RUNNING) {
+				throw new IllegalStateException();
+			}
+			LOG.info("updating "+task);
+			StringBinding.stringToEntry(task.getName(), key);
+			taskBinding.objectToEntry(task, data);
+			if(this.targetsDatabase.put(txn, key, data)!=OperationStatus.SUCCESS) {
+				LOG.error("Cannot update "+task);
 				return -1;
-				}
+				}			
 			}
 		LOG.info("exiting SUCCESS");	
 		
@@ -557,6 +643,7 @@ private int runstep(final String argv[]) {
 		LOG.error("Boum", err);
 		return -1;
 	} finally {
+		close();
 	}
 }
 
@@ -564,7 +651,11 @@ private int runstep(final String argv[]) {
 private int instanceMain(final String[] args) {
 
 	if(args.length<1) {
-		System.err.println("Usage ");//TODO
+		System.err.println("Usage: ");
+		System.err.println(" kill ");
+		System.err.println(" list ");
+		System.err.println(" build : create new scheduler from an existing Makefile ");
+		System.err.println(" run ");
 		return -1;
 	} else if(args[0].equals("kill")) {
 		final String args2[]=new String[args.length-1];

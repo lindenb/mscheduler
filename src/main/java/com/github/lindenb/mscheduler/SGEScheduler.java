@@ -1,3 +1,27 @@
+/*
+The MIT License (MIT)
+
+Copyright (c) 2016 Pierre Lindenbaum
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+*/
 package com.github.lindenb.mscheduler;
 
 import java.io.BufferedReader;
@@ -22,7 +46,7 @@ private SGEScheduler() {
 }
 
 @Override
-protected  int getJobStatus(final Task t) {
+protected  int updateJobStatus(final Task t) {
 	final Pattern wsSplit = Pattern.compile("[ \t]+");
 	/* first we try qstat, and then qacct */
 	for(int side=0; side < 2;++side)
@@ -34,6 +58,7 @@ protected  int getJobStatus(final Task t) {
 		cmdargs.add(side==0?"qstat":"qacct");
 		cmdargs.add("-j");
 		cmdargs.add(t.processId);
+		LOG.info("checking `"+String.join(" ", cmdargs)+"`");
 		final ProcessBuilder procbuilder= new ProcessBuilder(cmdargs);
 		procbuilder.directory(getWorkingDirectory());
 		final Process proc = procbuilder.start();
@@ -42,8 +67,10 @@ protected  int getJobStatus(final Task t) {
 		in =new BufferedReader(new InputStreamReader(proc.getInputStream()));
 		String line;
 		boolean found_in_qstat=false;
+		boolean found_in_qacct=false;
 		while((line=in.readLine())!=null)
 			{
+			LOG.info(line);
 			final String tokens[]=wsSplit.split(line);
 			if(tokens.length<2) continue;
 			if(side==0) {
@@ -51,11 +78,27 @@ protected  int getJobStatus(final Task t) {
 					LOG.info("job "+t.processId+" still running");
 					found_in_qstat = true;
 					}
-				LOG.info(line);
 				}
 			else
 				{
-				
+				if(tokens[0].equals("exit_status") ) {
+					found_in_qacct = true;
+					if(tokens[1].equals("0")) {
+						t.targetStatus = TaskStatus.COMPLETED;
+					} else {
+						LOG.info("job "+t.processId+" FAILED");
+						t.targetStatus = TaskStatus.ERROR;
+						}
+					}
+				if(tokens[0].equals("failed") ) {
+					found_in_qacct = true;
+					if(tokens[1].equals("0")) {
+						t.targetStatus = TaskStatus.COMPLETED;
+					} else {
+						LOG.info("job "+t.processId+" FAILED");
+						t.targetStatus = TaskStatus.ERROR;
+						}
+					}
 				}
 			}
 		in.close();
@@ -68,7 +111,7 @@ protected  int getJobStatus(final Task t) {
 			if(side==1) return -1;
 			}
 		if(found_in_qstat) return 0;
-		
+		if(found_in_qacct)  return 0;
 	} catch (final Exception e) {
 		LOG.error("boum", e);
 		return -1;	
@@ -89,15 +132,16 @@ protected void kill(final Task t) throws IOException {
 @Override
 protected int submitJob(final Task task) {
 	LOG.info("Submitting "+task);
-	File scriptFile=null;
 	PrintWriter pw = null;
 	BufferedReader in=null;
 	try {
-		scriptFile = File.createTempFile("tmp.", ".bash",getWorkingDirectory());
-		pw = new PrintWriter(scriptFile);
+		task.shellScriptFile = File.createTempFile("tmp.", ".bash",getWorkingDirectory());
+		task.stdoutFile = File.createTempFile("tmp.", "."+task.nodeId+".stdout",getWorkingDirectory());
+		task.stderrFile = File.createTempFile("tmp.", "."+task.nodeId+".stderr",getWorkingDirectory());
+		pw = new PrintWriter(task.shellScriptFile);
 		pw.println("#!/bin/bash");
 		pw.println("#");
-		pw.println("#$ -N "+task.getFile().getName());
+		pw.println("#$ -N n"+task.nodeId);
 		pw.println("#$ -o "+task.stdoutFile.getPath());
 		pw.println("#$ -e "+task.stderrFile.getPath());
 		pw.println("#$ -cwd");
@@ -112,7 +156,7 @@ protected int submitJob(final Task task) {
 		pw.close();
 		pw=null;
 		
-		makeExecutable(scriptFile);
+		makeExecutable(task.shellScriptFile);
 		
 		//Your job 393326 ("test.sh") has been submitted
 		
@@ -152,10 +196,10 @@ protected int submitJob(final Task task) {
 			}
 		in.close();
 		
-		int ret = proc.waitFor();
+		final int ret = proc.waitFor();
 		if(ret!=0)
 			{
-			LOG.error("process failed");
+			LOG.error("process failed : error "+ret);
 			return -1;
 			}
 		
@@ -167,7 +211,6 @@ protected int submitJob(final Task task) {
 		LOG.info("OK job ID =" + task.processId );
 		
 		task.startMilliSec = System.currentTimeMillis();
-		task.shellScriptFile = scriptFile;
 		task.targetStatus = TaskStatus.RUNNING;
 		return 0;
 	} catch (final Exception e) {

@@ -4,6 +4,7 @@ SPACE := $(EMPTY) $(EMPTY)
 berkeleydb.version?=6.2.31
 berkeleydb.jar?=$(lib.dir)/com/sleepycat/je/${berkeleydb.version}/je-${berkeleydb.version}.jar
 
+.PHONY: all clean test sgescheduler
 
 j4make.jars =  \
 	$(lib.dir)/commons-cli/commons-cli/1.3.1/commons-cli-1.3.1.jar \
@@ -15,29 +16,53 @@ j4make.jars =  \
 all_maven_jars = $(sort  ${apache.derby.tools} ${j4make.jars})
 
 all: sgescheduler  ${all_maven_jars} ${berkeleydb.jar} j4make/dist/j4make.jar
-	rm -rf _tmp
-	mkdir _tmp
-	java -cp "$(subst $(SPACE),:,$(filter %.jar,$^)):dist/sgescheduler.jar"  com.github.lindenb.mscheduler.SGEScheduler \
-		 build -m trace.txt -d _tmp
-	java -cp "$(subst $(SPACE),:,$(filter %.jar,$^)):dist/sgescheduler.jar"  com.github.lindenb.mscheduler.SGEScheduler \
-		 run  -d _tmp
 
 
 sgescheduler: ${all_maven_jars} ${berkeleydb.jar} j4make/dist/j4make.jar
-	rm -rf _tmp
+	rm -rf _tmp  dist/sgescheduler.jar
 	mkdir -p _tmp/META-INF dist
+	$(foreach J,$(filter %.jar,$^),unzip -q -o ${J} -d _tmp;)
 	javac -d _tmp -sourcepath src/main/java \
 		-cp  "$(subst $(SPACE),:,$(filter %.jar,$^))" \
 		./src/main/java/com/github/lindenb/mscheduler/SGEScheduler.java
-	jar cvf dist/mscheduler.jar -C _tmp .
+	echo "Manifest-Version: 1.0" > _tmp/META-INF/MANIFEST.MF
+	echo "Main-Class: com.github.lindenb.mscheduler.SGEScheduler" >>_tmp/META-INF/MANIFEST.MF
+	jar cMf dist/sgescheduler.jar -C _tmp .
 	rm -rf _tmp
+	
+
+test : sgescheduler
+	rm -rf _tmp
+	mkdir -p _tmp
+	java -jar  dist/sgescheduler.jar build -d ${PWD}/_tmp -m ${PWD}/tests/test01.mk
+	java -jar  dist/sgescheduler.jar list -d ${PWD}/_tmp
+	java -jar  dist/sgescheduler.jar run -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar list -d ${PWD}/_tmp
+	java -jar  dist/sgescheduler.jar run  -j 3 -d ${PWD}/_tmp
+	java -jar  dist/sgescheduler.jar run  -j 3 -d ${PWD}/_tmp
+	java -jar  dist/sgescheduler.jar run  -j 3 -d ${PWD}/_tmp
+	java -jar  dist/sgescheduler.jar run  -j 3 -d ${PWD}/_tmp
+	java -jar  dist/sgescheduler.jar list -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar list -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar run -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar run -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar run -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar run -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar run -d ${PWD}/_tmp
+	sleep 5
+	java -jar  dist/sgescheduler.jar list -d ${PWD}/_tmp
 	
 
 j4make/dist/j4make.jar :
 	(cd j4make && ${MAKE})
 	
-	
-
 ${berkeleydb.jar}:
 	mkdir -p $(dir $@) && wget -O "$@" "http://download.oracle.com/maven/com/sleepycat/je/${berkeleydb.version}/je-${berkeleydb.version}.jar"
 
@@ -46,4 +71,4 @@ ${all_maven_jars}  :
 	mkdir -p $(dir $@) && wget -O "$@" "http://central.maven.org/maven2/$(patsubst ${lib.dir}/%,%,$@)"
 
 clean:
-	rm -rf ${lib.dir}
+	rm -rf ${lib.dir} _tmp
