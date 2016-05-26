@@ -186,6 +186,9 @@ protected int submitJob(final Task task) {
 		LOG.info("submitting "+task);
 		final List<String> cmdargs= new ArrayList<>();
 		cmdargs.add("qsub");
+		cmdargs.add("-terse");/* causes  the qsub to display only the job-id of the job being submitted rather than the regular "Your job ..." */
+		
+		
 		cmdargs.add(task.shellScriptFile.getName());
 		final ProcessBuilder procbuilder= new ProcessBuilder(cmdargs);
 		procbuilder.directory(task.shellScriptFile.getParentFile());
@@ -193,23 +196,10 @@ protected int submitJob(final Task task) {
 		StreamBoozer sb = new StreamBoozer(proc.getErrorStream(),System.err,"[qsub]");
 		sb.start();
 		in =new BufferedReader(new InputStreamReader(proc.getInputStream()));
-		final String qsub_prefix="Your job ";
 		String line;
 		while((line=in.readLine())!=null)
 			{
-			if(!line.startsWith(qsub_prefix))
-				{
-				LOG.error("expected "+line+" to start with "+qsub_prefix);
-				return -1;
-				}
-			final int par = line.indexOf("(");
-			if(par<1)
-				{
-				LOG.error("cannot find parenthesis in "+line);
-				return -1;
-				}
-			
-			final long sgejobid = Long.parseLong(line.substring(qsub_prefix.length(),par).trim());
+			final long sgejobid = Long.parseLong(line);
 			if( sgejobid <= 0L )
 				{
 				LOG.error("Bad job id in  "+line);

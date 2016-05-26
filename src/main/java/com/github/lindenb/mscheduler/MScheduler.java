@@ -67,6 +67,7 @@ public abstract class MScheduler {
 	private static final String OPTION_HELP="h";
 	private static final String OPTION_WORKDIR="d";
 	private static final String OPTION_MAKEFILEIN="m";
+	private static final String OPTION_MAKE_EXECUTABLE="make";
 	private static final String OPTION_RESETFAILURE="r";
 	private static final String OPTION_N_JOBS="j";
 	private static final String BASEDIRKEY="base.directory";
@@ -133,7 +134,10 @@ private File getStopFile() {
 
 
 /** open bdb env */
-private int openEnvironement(Transaction txn,boolean allowCreate,boolean readOnly) throws IOException {
+private int openEnvironement(
+		final Transaction txn,
+		final boolean allowCreate,
+		final boolean readOnly) throws IOException {
 	try {
 		if(this.workingDirectory==null) {
 			LOG.error("working directory undefined");
@@ -232,7 +236,15 @@ private int printHelp(final String helpName) {
 private int build(final String argv[]) {
 	Transaction txn = null;
 	BufferedReader in = null;
+	String makeExecutable="make";
 	try {
+		this.options.addOption(Option.builder(OPTION_MAKE_EXECUTABLE).
+				hasArg(true).
+				longOpt(OPTION_MAKE_EXECUTABLE).
+				argName("MAKE").
+				desc("make executable. Default: "+makeExecutable).
+				build());
+		
 		this.options.addOption(Option.builder(OPTION_MAKEFILEIN).
 				hasArg(true).
 				longOpt("makefile").
@@ -243,6 +255,10 @@ private int build(final String argv[]) {
 		final CommandLineParser parser = new DefaultParser();
 		this.cmdLine = parser.parse(this.options, argv);
 		final List<String> args= this.cmdLine.getArgList();
+		
+		if(cmdLine.hasOption(OPTION_MAKE_EXECUTABLE)) {
+			makeExecutable = cmdLine.getOptionValue(OPTION_MAKE_EXECUTABLE);
+		}
 		
 		if(cmdLine.hasOption(OPTION_HELP)) {
 			return printHelp("build");
@@ -276,7 +292,7 @@ private int build(final String argv[]) {
 		}
          
      	final List<String> cmdargs= new ArrayList<>();
-		cmdargs.add("make");
+		cmdargs.add(makeExecutable);
 		cmdargs.add("-ndr");
 		cmdargs.add("-C");
 		cmdargs.add(makefileIn.getParentFile().getPath());
@@ -336,7 +352,7 @@ private int build(final String argv[]) {
 }
 
 
-protected abstract void kill(Task t)  throws IOException;
+protected abstract void kill(final Task t)  throws IOException;
 
 
 private int kill(final String argv[]) {
@@ -480,14 +496,18 @@ try {
 	close();
 }
 }
+
+/** A StatusChecker will update task.targetStatus */
 protected abstract class StatusChecker implements Callable<Integer>
 	{
+	/** targetStatus will be updated by the checker */
 	protected final Task task;
 	protected StatusChecker(final Task task) {
 		this.task = task;
 		}
 	}
 
+/** creates a Status Checker for this scheduler */
 protected abstract StatusChecker createStatusChecker(final Task task);
 
 protected int updateJobStatus(final Task task) {
@@ -572,7 +592,6 @@ private int runstep(final String argv[]) {
 					last_failed_job = jobInfo;
 					LOG.error("job "+jobInfo+" failed.. Use -reset to reset values");
 					break;
-
 				/* last time we checked, the job was running */
 				case RUNNING:
 					{
@@ -745,6 +764,69 @@ private int runstep(final String argv[]) {
 }
 
 
+private int runeow(final String argv[]) {
+	final Transaction txn=null;
+	Cursor c = null;
+	try {
+		
+		
+		final CommandLineParser parser = new DefaultParser();
+		this.cmdLine = parser.parse(this.options, argv);		
+		
+		if(this.cmdLine.hasOption(OPTION_HELP)) {
+			printHelp("Test the whole workflow. Returns 0 if more job needs to be run");
+			return 0;
+		}
+		
+		
+		if(!this.cmdLine.getArgList().isEmpty()) {
+			LOG.error("Illegal number of arguments");
+			return -1;
+		}
+		
+		if(this.parseWorkingDirectory()!=0) return -1;
+		if(openEnvironement(txn, false,true)!=0) return -1;
+
+		int return_status= 0;
+		
+		/* loop over jobs, check there is no previous FAILED status */
+		c = this.targetsDatabase.openCursor(txn, null);
+		final Task.Binding taskBinding = new Task.Binding();
+		DatabaseEntry key=new DatabaseEntry();
+		DatabaseEntry data=new DatabaseEntry();
+		while(
+			return_status==0 && 
+			c.getNext(key, data, LockMode.DEFAULT)==OperationStatus.SUCCESS) {
+			final Task jobInfo = taskBinding.entryToObject(data);
+			if(jobInfo.getName().contains("<")) continue;//<ROOT>
+			switch(jobInfo.targetStatus)
+				{
+				case COMPLETED: break;
+				case TOBEDONE: 
+				case ERROR:
+				case RUNNING:
+					{
+					LOG.info("workflow requires job: "+jobInfo);
+					return_status = -1;
+					break;
+					}
+				default: throw new IllegalStateException(jobInfo+" "+jobInfo.targetStatus);
+				}
+				
+			}
+		c.close();c=null;
+		LOG.info("eow returns : "+ return_status);
+		return return_status;
+	} catch(Exception err) {
+		LOG.error("Boum", err);
+		return -1;
+	} finally {
+		close();
+	}
+}
+
+
+
 private int instanceMain(final String[] args) {
 
 	if(args.length<1) {
@@ -753,29 +835,28 @@ private int instanceMain(final String[] args) {
 		System.err.println(" list list all jobs");
 		System.err.println(" build : create new scheduler from an existing Makefile ");
 		System.err.println(" run  execute one step");
+		System.err.println(" eow  (end of workflow) returns 0 if  more job to be run");
 		return -1;
-	} else if(args[0].equals("kill")) {
+	} else
+		{
 		final String args2[]=new String[args.length-1];
 		System.arraycopy(args, 1, args2, 0, args2.length);
-		return kill(args2);
-	} else if(args[0].equals("list")) {
-		final String args2[]=new String[args.length-1];
-		System.arraycopy(args, 1, args2, 0, args2.length);
-		return list(args2);
-	} else if(args[0].equals("build")) {
-		final String args2[]=new String[args.length-1];
-		System.arraycopy(args, 1, args2, 0, args2.length);
-		return build(args2);
-	} else if(args[0].equals("run")) {
-		final String args2[]=new String[args.length-1];
-		System.arraycopy(args, 1, args2, 0, args2.length);
-		return runstep(args2);
-	}
-	else {
-		LOG.error("Unknown command "+args[0]);
-		return -1;
+		if(args[0].equals("kill")) {
+			return kill(args2);
+		} else if(args[0].equals("list")) {
+			return list(args2);
+		} else if(args[0].equals("build")) {
+			return build(args2);
+		} else if(args[0].equals("run")) {
+			return runstep(args2);
+		}else if(args[0].equals("eow")) {
+			return runeow(args2);
 		}
-	
+		else {
+			LOG.error("Unknown command "+args[0]);
+			return -1;
+		}
+		}
 	}
 
 

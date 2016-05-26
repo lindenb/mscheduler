@@ -58,7 +58,18 @@ public class CCRTScheduler extends MScheduler {
 		TIMEOUT
 		}
 	
+	/** A StatusChecker will call sacct task.targetStatus 
+	 * example output:
+<pre>
+$ sacct -p -j 3930550
+JobID|JobName|Partition|Account|AllocCPUS|State|ExitCode|
+3930550|index-reference.bash|large|fg0019@large|6|COMPLETED|0:0|
+3930550.batch|batch||fg0019@large|1|COMPLETED|0:0|
+</pre>
+ 
 	
+	 * */
+
 	private class SacctCall extends StatusChecker
 		{
 		SacctCall(final Task task)
@@ -93,7 +104,7 @@ public class CCRTScheduler extends MScheduler {
 					//ignore header
 					if(line.trim().isEmpty()) continue;
 					if(line.startsWith("JobID|")) continue;
-					String tokens[]=delimPipes.split(line);
+					final String tokens[]=delimPipes.split(line);
 					if(tokens.length<7)
 						{
 						LOG.error("expected 7 tokens in "+line);
@@ -155,7 +166,7 @@ public class CCRTScheduler extends MScheduler {
 					}
 				return 0;
 				}
-			catch (Exception e)
+			catch (final Exception e)
 				{
 				LOG.error("failure", e);
 				return -1;
@@ -189,7 +200,7 @@ public class CCRTScheduler extends MScheduler {
 		boolean got_ccmsub_o = false;
 		boolean got_ccmsub_e = false;
 		boolean got_ccmsub_r = false;
-		for(final String line:t.shellScriptLines )
+		for(final String line: t.shellScriptLines )
 			{
 			if(line.startsWith("#MSUB"))
 				{
@@ -227,7 +238,7 @@ public class CCRTScheduler extends MScheduler {
 			}
 		
 		LOG.info(t.shellScriptFile.getPath());
-		PrintWriter fw= new PrintWriter(t.shellScriptFile);
+		final PrintWriter fw= new PrintWriter(t.shellScriptFile);
 		fw.println("#!/bin/bash");
 		while(header_index< lines.size() && lines.get(header_index).startsWith("#"))
 			{
